@@ -1,0 +1,93 @@
+# Production stack for a single VPS: PostgreSQL + Finora + Caddy (automatic HTTPS) + daily cron.
+#
+#   cp .env.production.example .env.production   # fill in the values
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# See deploy/README.md for the full walkthrough.
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://finora:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/finora?schema=public
+  AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+  AUTH_TRUST_HOST: "true"
+  AUTH_URL: https://${DOMAIN:?set DOMAIN}
+  CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: finora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: finora
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finora -d finora"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # No published port: the database is reachable only from the other containers.
+
+  # Applies pending Prisma migrations, then exits. The app starts only after it succeeds.
+  migrate:
+    build:
+      context: .
+      target: builder
+    environment: *app-env
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: runner
+    image: finora:latest
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "3000"
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
+  # Daily housekeeping (recurring transactions, bill/budget notifications, snapshots).
+  # 17:00 UTC = 00:00 WIB, same schedule as vercel.json.
+  cron:
+    image: alpine:3.22
+    restart: unless-stopped
+    environment:
+      CRON_SECRET: ${CRON_SECRET}
+    command:
+      - sh
+      - -c
+      - |
+        echo "0 17 * * * wget -qO- --header='Authorization: Bearer $$CRON_SECRET' http://app:3000/api/cron/daily" > /etc/crontabs/root
+        exec crond -f -l 8
+    depends_on:
+      - app
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
