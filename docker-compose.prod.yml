@@ -1,7 +1,11 @@
-# Production stack for a single VPS: PostgreSQL + Finora + Caddy (automatic HTTPS) + daily cron.
+# Production stack: PostgreSQL + Finora + Cloudflare Tunnel + daily cron.
 #
 #   cp .env.production.example .env.production   # fill in the values
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Public traffic arrives through Cloudflare Tunnel (cloudflared -> app:3000); Cloudflare
+# handles HTTPS, so no ports are opened on the host. To use Caddy with Let's Encrypt
+# instead (server with a public IP), add `--profile caddy` and leave TUNNEL_TOKEN unused.
 #
 # See deploy/README.md for the full walkthrough.
 
@@ -55,8 +59,21 @@ services:
       - "3000"
     stop_grace_period: 30s
 
+  # Cloudflare Tunnel: outbound-only connection to Cloudflare, no public IP or open ports needed.
+  # In the Cloudflare dashboard, set the tunnel's public hostname to ${DOMAIN} -> http://app:3000.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
+    depends_on:
+      - app
+
+  # Optional: only started with `--profile caddy` (server with a public IP, ports 80/443 open).
   caddy:
     image: caddy:2-alpine
+    profiles: ["caddy"]
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN}
